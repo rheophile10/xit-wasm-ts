@@ -8,11 +8,15 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./host-node": "./src/host-node.ts"
+    "./node": "./src/host-node.ts"
   },
   "scripts": {
     "smoke": "node example/run-smoke.ts",
+    "smoke:archive": "node example/run-archive.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

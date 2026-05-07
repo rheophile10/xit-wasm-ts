@@ -1,7 +1,16 @@
 /**
- * Entry point. Loads the wasm and exposes a small typed wrapper for the
- * exported xit functions.
+ * Public entry point.
+ *
+ * The headline API is the `Archive` class — a pure in-memory, browser-safe
+ * wrapper that hides every wasm/host/file detail. It's what plastron uses.
+ *
+ * The lower-level loader below (`load`) is kept for the existing smoke tests
+ * and any consumer who wants to drive the wasm directly. Most users want
+ * `Archive`.
  */
+
+export { Archive, setDefaultWasmSource } from "./archive.ts";
+export type { CommitOptions, LoadOptions, WasmSource } from "./archive.ts";
 
 import * as fs from "node:fs/promises";
 import { hostImports } from "./host.ts";
