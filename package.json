@@ -1,0 +1,21 @@
+{
+  "name": "xit-wasm",
+  "version": "0.0.0",
+  "description": "TypeScript bindings for xit (Zig) compiled to WebAssembly. Pairs with xitdb-ts.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./host-node": "./src/host-node.ts"
+  },
+  "scripts": {
+    "smoke": "node example/run-smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
