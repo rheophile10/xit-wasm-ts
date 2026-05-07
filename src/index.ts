@@ -12,6 +12,7 @@ export interface XitInstance {
   abiVersion(): number;
   initRepo(absPath: string): number;
   smokeInitAddCommit(absPath: string): number;
+  smokeXitInitAddCommit(absPath: string): number;
 }
 
 interface RawExports {
@@ -19,6 +20,7 @@ interface RawExports {
   xit_abi_version(): number;
   xit_init_repo(pathPtr: number, pathLen: number): number;
   xit_smoke_init_add_commit(pathPtr: number, pathLen: number): number;
+  xit_smoke_xit_init_add_commit(pathPtr: number, pathLen: number): number;
   xit_probe_host_io(): number;
 }
 
@@ -71,6 +73,10 @@ export async function load(wasmPath: string, host: Host): Promise<XitInstance> {
     smokeInitAddCommit(absPath: string) {
       const { ptr, len } = writeScratch(absPath);
       return exp.xit_smoke_init_add_commit(ptr, len);
+    },
+    smokeXitInitAddCommit(absPath: string) {
+      const { ptr, len } = writeScratch(absPath);
+      return exp.xit_smoke_xit_init_add_commit(ptr, len);
     },
   };
 }
