@@ -14,15 +14,10 @@
  * handle, a host, or a path inside the wasm. This is the API plastron sees.
  */
 
-import * as path from "node:path";
-import { Archive, setDefaultWasmSource } from "../src/index.ts";
-
-const WASM_PATH = path.resolve(import.meta.dirname, "../../xit/zig-out/bin/xit.wasm");
+import { Archive } from "../src/index.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
-setDefaultWasmSource(WASM_PATH);
 
 async function main() {
   console.log("=== fresh archive ===");

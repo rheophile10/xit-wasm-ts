@@ -37,6 +37,38 @@ export interface LoadOptions {
 
 export type WasmSource = Uint8Array | URL | string | ArrayBuffer;
 
+export interface CommitInfo {
+  oid: string;
+  parents: string[];
+  /** Unix timestamp in seconds — taken from the commit metadata. May be 0
+   *  if the commit was created without an explicit timestamp. */
+  timestamp: number;
+  author: string;
+  message: string;
+}
+
+export interface BranchListing {
+  branches: string[];
+  /** Index into `branches` of the currently checked-out branch, or null if
+   *  HEAD is detached or not on any of the listed refs. */
+  current: number | null;
+}
+
+export interface MergeOptions {
+  message?: string;
+  author?: string;
+}
+
+export type MergeResult =
+  | { kind: "success"; oid: string }
+  | { kind: "fast_forward" }
+  | { kind: "nothing" }
+  | { kind: "conflict" };
+
+export interface SwitchResult {
+  kind: "success" | "conflict";
+}
+
 interface RawExports {
   memory: WebAssembly.Memory;
   xit_abi_version(): number;
@@ -56,27 +88,62 @@ interface RawExports {
     outOidPtr: number,
     outOidLen: number,
   ): number;
+  xit_repo_log(handle: number, maxCount: number, outSize: number): number;
+  xit_repo_branch_add(handle: number, namePtr: number, nameLen: number): number;
+  xit_repo_branch_list(handle: number, outSize: number): number;
+  xit_repo_switch(handle: number, targetPtr: number, targetLen: number): number;
+  xit_repo_merge(
+    handle: number,
+    branchPtr: number,
+    branchLen: number,
+    msgPtr: number,
+    msgLen: number,
+    authorPtr: number,
+    authorLen: number,
+    outSize: number,
+  ): number;
 }
 
 let defaultWasmSource: WasmSource | undefined;
 
 /** Configure where the wasm module is loaded from for any subsequent
- *  Archive.open() call that doesn't pass `opts.wasm`. */
+ *  Archive.open() call that doesn't pass `opts.wasm`. Most consumers don't
+ *  need this — the package ships its `xit.wasm` next to the entry module
+ *  and the loader auto-resolves it via `import.meta.url`. Useful when:
+ *
+ *    - You want to load from a CDN (`new URL("https://...")`).
+ *    - You want to use a different wasm artifact (e.g. dev build).
+ *    - Your bundler doesn't preserve `import.meta.url` and you need to
+ *      fall back to a hand-supplied URL or pre-fetched bytes. */
 export function setDefaultWasmSource(source: WasmSource): void {
   defaultWasmSource = source;
+}
+
+/** Default location of `xit.wasm` shipped with the package. Resolves
+ *  consistently from src (during dev) and from dist (after build) because
+ *  the file lives at the package root, one level up from either entry. */
+function bundledWasmUrl(): URL {
+  return new URL("../xit.wasm", import.meta.url);
 }
 
 async function resolveWasmBytes(source: WasmSource): Promise<Uint8Array> {
   if (source instanceof Uint8Array) return source;
   if (source instanceof ArrayBuffer) return new Uint8Array(source);
-  // URL or string path — fetch in browser-ish, fs.readFile in Node-ish.
+
   const ref = source instanceof URL ? source.toString() : source;
-  if (typeof globalThis.fetch === "function" && /^https?:|^file:|^blob:/.test(ref)) {
+
+  // Prefer fetch for http(s) and blob URLs (browser, Bun, modern Node);
+  // file:// and bare paths go through the Node fs path so we don't take a
+  // dependency on fetch supporting file URLs (Node only added that recently).
+  if (typeof globalThis.fetch === "function" && /^https?:|^blob:/.test(ref)) {
     const r = await fetch(ref);
     return new Uint8Array(await r.arrayBuffer());
   }
-  // Node / Bun / Deno fallback.
+
   const fs = await import("node:fs/promises");
+  if (ref.startsWith("file:")) {
+    return new Uint8Array(await fs.readFile(new URL(ref)));
+  }
   return new Uint8Array(await fs.readFile(ref));
 }
 
@@ -108,13 +175,7 @@ export class Archive {
    *  (master branch, no commits). With `bytes`, unzips into memory and
    *  opens the existing repo. */
   static async open(bytes?: Uint8Array, opts: LoadOptions = {}): Promise<Archive> {
-    const wasmSource = opts.wasm ?? defaultWasmSource;
-    if (!wasmSource) {
-      throw new Error(
-        "xit-wasm: no wasm source configured. Call setDefaultWasmSource() at startup or pass opts.wasm to Archive.open().",
-      );
-    }
-
+    const wasmSource = opts.wasm ?? defaultWasmSource ?? bundledWasmUrl();
     const wasmBytes = await resolveWasmBytes(wasmSource);
     // WebAssembly.compile expects a BufferSource over a non-shared ArrayBuffer.
     // Make a fresh copy with a plain ArrayBuffer to satisfy strict typings.
@@ -210,6 +271,76 @@ export class Archive {
     return oid;
   }
 
+  /** Walk commit history reachable from HEAD. Newest first. */
+  async log(opts: { limit?: number } = {}): Promise<CommitInfo[]> {
+    return this.callBufReturn(
+      (outSizePtr) => this.exports.xit_repo_log(this.repoHandle, opts.limit ?? 0, outSizePtr),
+      (bytes) => decodeLog(bytes),
+    );
+  }
+
+  /** Create a new branch off the current HEAD. */
+  async branch(name: string): Promise<void> {
+    const enc = new TextEncoder();
+    const code = this.withBytes(enc.encode(name), (ptr, len) =>
+      this.exports.xit_repo_branch_add(this.repoHandle, ptr, len),
+    );
+    if (code < 0) throw new Error(`xit-wasm: xit_repo_branch_add failed with code ${code}`);
+  }
+
+  /** Returns every branch name plus an index identifying the currently
+   *  checked-out one (or null when HEAD is detached). */
+  async listBranches(): Promise<BranchListing> {
+    return this.callBufReturn(
+      (outSizePtr) => this.exports.xit_repo_branch_list(this.repoHandle, outSizePtr),
+      (bytes) => decodeBranches(bytes),
+    );
+  }
+
+  /** Convenience: just the currently checked-out branch name, or null. */
+  async currentBranch(): Promise<string | null> {
+    const { branches, current } = await this.listBranches();
+    return current === null ? null : branches[current] ?? null;
+  }
+
+  /** Switch the working tree to the named branch. */
+  async checkout(branch: string): Promise<SwitchResult> {
+    const enc = new TextEncoder();
+    const code = this.withBytes(enc.encode(branch), (ptr, len) =>
+      this.exports.xit_repo_switch(this.repoHandle, ptr, len),
+    );
+    if (code < 0) throw new Error(`xit-wasm: xit_repo_switch failed with code ${code}`);
+    return { kind: code === 0 ? "success" : "conflict" };
+  }
+
+  /** Merge the named branch into the current HEAD. */
+  async merge(branch: string, opts: MergeOptions = {}): Promise<MergeResult> {
+    const enc = new TextEncoder();
+    const message = opts.message ?? `merge ${branch}`;
+    const author = opts.author ?? "plastron <plastron@local>";
+
+    return this.callBufReturn(
+      (outSizePtr) =>
+        this.withBytes(enc.encode(branch), (bp, bl) =>
+          this.withBytes(enc.encode(message), (mp, ml) =>
+            this.withBytes(enc.encode(author), (ap, al) =>
+              this.exports.xit_repo_merge(
+                this.repoHandle,
+                bp,
+                bl,
+                mp,
+                ml,
+                ap,
+                al,
+                outSizePtr,
+              ),
+            ),
+          ),
+        ),
+      (bytes) => decodeMergeResult(bytes),
+    );
+  }
+
   /** Serialize the entire working tree (including repo internals) as a
    *  fflate zip. The result IS the .甲 byte stream. */
   async toBytes(): Promise<Uint8Array> {
@@ -227,6 +358,29 @@ export class Archive {
   }
 
   // ---- internal: marshalling helpers ----
+
+  /** Pattern shared by log/branch_list/merge: wasm allocates a result buffer,
+   *  writes the size to a u32 out-parameter, returns the pointer. We copy
+   *  the bytes out, free both, and hand them to a decoder. */
+  private callBufReturn<T>(
+    call: (outSizePtr: number) => number,
+    decode: (bytes: Uint8Array) => T,
+  ): T {
+    const outSizePtr = this.exports.xit_alloc(4);
+    if (outSizePtr === 0) throw new Error("xit-wasm: alloc failed for out_size");
+    let dataPtr = 0;
+    let size = 0;
+    try {
+      dataPtr = call(outSizePtr);
+      if (dataPtr === 0) throw new Error("xit-wasm: returned null buffer");
+      size = new DataView(this.memory.buffer, outSizePtr, 4).getUint32(0, true);
+      const copy = new Uint8Array(this.memory.buffer, dataPtr, size).slice();
+      return decode(copy);
+    } finally {
+      if (dataPtr !== 0) this.exports.xit_free(dataPtr, size);
+      this.exports.xit_free(outSizePtr, 4);
+    }
+  }
 
   private withBytes<T>(bytes: Uint8Array, fn: (ptr: number, len: number) => T): T {
     const ptr = this.exports.xit_alloc(bytes.length);
@@ -286,4 +440,57 @@ export class Archive {
 
 function stripLeading(p: string): string {
   return p.startsWith("/") ? p.slice(1) : p;
+}
+
+// =========================================================================
+// Wire decoders (mirror the formats documented in xit/src/lib.zig).
+// =========================================================================
+
+const dec = new TextDecoder();
+
+function decodeLog(buf: Uint8Array): CommitInfo[] {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let p = 0;
+  const count = dv.getUint32(p, true); p += 4;
+  const out: CommitInfo[] = [];
+  for (let i = 0; i < count; i++) {
+    const oid = dec.decode(buf.subarray(p, p + OID_HEX)); p += OID_HEX;
+    const parentCount = dv.getUint32(p, true); p += 4;
+    const parents: string[] = [];
+    for (let j = 0; j < parentCount; j++) {
+      parents.push(dec.decode(buf.subarray(p, p + OID_HEX))); p += OID_HEX;
+    }
+    const timestamp = Number(dv.getBigUint64(p, true)); p += 8;
+    const authorLen = dv.getUint32(p, true); p += 4;
+    const author = dec.decode(buf.subarray(p, p + authorLen)); p += authorLen;
+    const messageLen = dv.getUint32(p, true); p += 4;
+    const message = dec.decode(buf.subarray(p, p + messageLen)); p += messageLen;
+    out.push({ oid, parents, timestamp, author, message });
+  }
+  return out;
+}
+
+function decodeBranches(buf: Uint8Array): BranchListing {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let p = 0;
+  const count = dv.getUint32(p, true); p += 4;
+  const currentRaw = dv.getInt32(p, true); p += 4;
+  const branches: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const nameLen = dv.getUint32(p, true); p += 4;
+    branches.push(dec.decode(buf.subarray(p, p + nameLen))); p += nameLen;
+  }
+  return { branches, current: currentRaw < 0 ? null : currentRaw };
+}
+
+function decodeMergeResult(buf: Uint8Array): MergeResult {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const kind = dv.getUint32(0, true);
+  switch (kind) {
+    case 0: return { kind: "success", oid: dec.decode(buf.subarray(4, 4 + OID_HEX)) };
+    case 1: return { kind: "fast_forward" };
+    case 2: return { kind: "nothing" };
+    case 3: return { kind: "conflict" };
+    default: throw new Error(`xit-wasm: unexpected merge result kind ${kind}`);
+  }
 }

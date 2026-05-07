@@ -16,9 +16,11 @@
       "default": "./dist/host-node.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": ["dist", "src", "xit.wasm"],
   "scripts": {
-    "build": "tsc",
+    "build:wasm": "cp ../xit/zig-out/bin/xit.wasm xit.wasm",
+    "build:tsc": "tsc",
+    "build": "npm run build:wasm && npm run build:tsc",
     "prepublishOnly": "npm run build",
     "smoke": "node example/run-smoke.ts",
     "smoke:archive": "node example/run-archive.ts",
