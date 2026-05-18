@@ -140,7 +140,26 @@ async function resolveWasmBytes(source: WasmSource): Promise<Uint8Array> {
     return new Uint8Array(await r.arrayBuffer());
   }
 
-  const fs = await import("node:fs/promises");
+  // Fall back to Node fs only when actually running on Node. Browser
+  // bundlers that statically analyze a bare `import("node:fs/promises")`
+  // would emit it as a stub and warn even when this branch is
+  // unreachable; routing through a runtime-built specifier keeps the
+  // browser build clean. The Node-default `bundledWasmUrl()` uses
+  // `import.meta.url`, which resolves to an http(s) URL after Vite asset
+  // emission — so browsers take the fetch branch above and never reach
+  // this fallback.
+  const isNode = typeof globalThis.process !== "undefined"
+    && globalThis.process.versions != null
+    && typeof globalThis.process.versions.node === "string";
+  if (!isNode) {
+    throw new Error(
+      `xit-wasm: cannot resolve wasm source "${ref}" — fetch is unavailable ` +
+      `and no Node fs is present. Pass opts.wasm as a Uint8Array, ArrayBuffer, ` +
+      `or http(s)/blob URL.`,
+    );
+  }
+  const nodeFsSpecifier = "node:fs/promises";
+  const fs = await import(/* @vite-ignore */ nodeFsSpecifier);
   if (ref.startsWith("file:")) {
     return new Uint8Array(await fs.readFile(new URL(ref)));
   }

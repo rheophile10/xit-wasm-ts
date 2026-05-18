@@ -12,7 +12,6 @@
 export { Archive, setDefaultWasmSource } from "./archive.ts";
 export type { CommitOptions, LoadOptions, WasmSource } from "./archive.ts";
 
-import * as fs from "node:fs/promises";
 import { hostImports } from "./host.ts";
 import type { Host } from "./host.ts";
 
@@ -54,6 +53,16 @@ const SCRATCH_OFFSET = 1 << 16; // start of page 1
 const SCRATCH_SIZE = 4096;
 
 export async function load(wasmPath: string, host: Host): Promise<XitInstance> {
+  // Dynamic import keeps the entry module browser-clean. `load()` is a
+  // Node-only smoke-test helper; bundlers that statically analyze a top-
+  // level `node:fs/promises` import would mark the whole module as
+  // node-only and fail to ship a browser build of the headline `Archive`
+  // API alongside it. The runtime-built specifier + @vite-ignore also
+  // suppresses Vite's "externalized for browser compatibility" warning
+  // for downstream consumers — `load()` is never reachable from a
+  // browser build path so the warning would be noise.
+  const nodeFsSpecifier = "node:fs/promises";
+  const fs = await import(/* @vite-ignore */ nodeFsSpecifier);
   const bytes = await fs.readFile(wasmPath);
   const mod = await WebAssembly.compile(bytes);
 
